@@ -13,6 +13,7 @@ import os
 import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from nanobanana_mcp_server.utils.validation_utils import (
     resolve_output_path,
@@ -123,9 +124,9 @@ class TestResolveOutputPath:
 
     def test_home_directory_expansion(self):
         """Paths with ~ are expanded."""
-        result = resolve_output_path("~/images/photo.png", "/default", "gen.png")
-        assert "~" not in result
-        assert os.path.isabs(result)
+        with patch.object(Path, "mkdir"):
+            result = resolve_output_path("~/images/photo.png", "/default", "gen.png")
+        assert result == str(Path.home() / "images/photo.png")
 
     def test_multiple_images_first_index(self):
         """First image (index 1) uses exact path."""

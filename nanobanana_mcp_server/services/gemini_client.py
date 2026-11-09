@@ -1,7 +1,10 @@
 import base64
 import logging
+from threading import Lock
 from typing import Any
 from urllib.parse import urlsplit
+
+import httpx
 
 from google import genai
 from google.genai import types as gx
@@ -29,43 +32,61 @@ class GeminiClient:
         self.config = config
         self.gemini_config = gemini_config
         self.logger = logging.getLogger(__name__)
-        self._client = None
+        self._client: genai.Client | None = None
+        self._http_client: httpx.Client | None = None
+        self._client_lock = Lock()
 
     @property
     def client(self) -> genai.Client:
         """Lazy initialization of Gemini client."""
-        if self._client is None:
-            http_options = {}
+        with self._client_lock:
+            if self._client is not None and (
+                self._http_client is None or not self._http_client.is_closed
+            ):
+                return self._client
+
+            http_options: gx.HttpOptionsDict = {}
             if self.config.gemini_base_url:
                 http_options["base_url"] = self.config.gemini_base_url
                 safe_url = self._get_safe_base_url_for_log(self.config.gemini_base_url)
                 self.logger.info(f"Using custom base URL: {safe_url}")
 
-            # Set request timeout (in milliseconds) to prevent indefinite hangs.
-            # Without this, httpx receives timeout=None which disables timeouts entirely.
             timeout_seconds = getattr(self.gemini_config, "request_timeout", 60)
             http_options["timeout"] = timeout_seconds * 1000
             self.logger.debug(f"Request timeout: {timeout_seconds}s")
 
-            if self.config.auth_method == AuthMethod.API_KEY:
-                if not self.config.gemini_api_key:
-                    raise AuthenticationError("API key is required for API_KEY auth method")
-                client_kwargs = {
-                    "api_key": self.config.gemini_api_key,
-                    "http_options": http_options,
-                }
-                self._client = genai.Client(**client_kwargs)
-                self._log_auth_method("API Key (Developer API)")
-            else:  # VERTEX_AI
-                client_kwargs = {
-                    "vertexai": True,
-                    "project": self.config.gcp_project_id,
-                    "location": self.config.gcp_region,
-                    "http_options": http_options,
-                }
-                self._client = genai.Client(**client_kwargs)
-                self._log_auth_method(f"ADC (Vertex AI - {self.config.gcp_region})")
-        return self._client
+            if self.config.auth_method == AuthMethod.API_KEY and not self.config.gemini_api_key:
+                raise AuthenticationError("API key is required for API_KEY auth method")
+
+            transport = httpx.Client(follow_redirects=True, timeout=timeout_seconds)
+            http_options["httpx_client"] = transport
+            try:
+                if self.config.auth_method == AuthMethod.API_KEY:
+                    client = genai.Client(
+                        api_key=self.config.gemini_api_key,
+                        http_options=http_options,
+                    )
+                    auth_description = "API Key (Developer API)"
+                else:
+                    client = genai.Client(
+                        vertexai=True,
+                        project=self.config.gcp_project_id,
+                        location=self.config.gcp_region,
+                        http_options=http_options,
+                    )
+                    auth_description = f"ADC (Vertex AI - {self.config.gcp_region})"
+            except Exception:
+                transport.close()
+                raise
+            self._http_client = transport
+            self._client = client
+            self._log_auth_method(auth_description)
+            return client
+
+    def __del__(self) -> None:
+        transport = getattr(self, "_http_client", None)
+        if transport is not None:
+            transport.close()
 
     @staticmethod
     def _get_safe_base_url_for_log(raw_url: str) -> str:
@@ -89,7 +110,8 @@ class GeminiClient:
         """
         try:
             # Lightweight API call
-            _ = self.client.models.list()
+            client = self.client
+            _ = client.models.list()
             return True
         except Exception as e:
             self.logger.error(f"Authentication validation failed: {e}")
@@ -205,7 +227,8 @@ class GeminiClient:
                 f"config={api_kwargs.get('config')}"
             )
 
-            response = self.client.models.generate_content(**api_kwargs)
+            client = self.client
+            response = client.models.generate_content(**api_kwargs)
             return response
 
         except Exception as e:
@@ -360,7 +383,8 @@ class GeminiClient:
         """
         try:
             # Gemini Files API only accepts file parameter
-            return self.client.files.upload(file=file_path)
+            client = self.client
+            return client.files.upload(file=file_path)
         except Exception as e:
             self.logger.error(f"File upload error: {e}")
             raise
@@ -368,7 +392,8 @@ class GeminiClient:
     def get_file_metadata(self, file_name: str):
         """Get file metadata from Gemini Files API."""
         try:
-            return self.client.files.get(name=file_name)
+            client = self.client
+            return client.files.get(name=file_name)
         except Exception as e:
             self.logger.error(f"File metadata error: {e}")
             raise

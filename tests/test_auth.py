@@ -72,7 +72,7 @@ class TestGeminiClientAuth:
 
         mock_client_cls.assert_called_with(
             api_key="test-key",
-            http_options={"timeout": 60000},
+            http_options={"timeout": 60000, "httpx_client": client._http_client},
         )
 
     @patch("google.genai.Client")
@@ -94,7 +94,7 @@ class TestGeminiClientAuth:
             vertexai=True,
             project="test-project",
             location="us-central1",
-            http_options={"timeout": 60000},
+            http_options={"timeout": 60000, "httpx_client": client._http_client},
         )
 
     @patch("google.genai.Client")
@@ -116,6 +116,7 @@ class TestGeminiClientAuth:
             http_options={
                 "base_url": "https://proxy.example.com/v1beta?token=secret",
                 "timeout": 60000,
+                "httpx_client": client._http_client,
             },
         )
         client.logger.info.assert_any_call("Using custom base URL: https://proxy.example.com")
